@@ -1,6 +1,15 @@
+/**
+ * TODO:
+ *  - Window resizing.
+ *  - Actual background
+ *
+ */
+
+#include <math.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+
 
 #include "GL/glew.h"
 
@@ -18,7 +27,9 @@ static bool g_should_quit = false;
 
 enum class AssetIndex {
     BACKGROUND,
-    SPRITE_INSERT,
+    SPRITE_JAW,
+    SPRITE_HEADTOP,
+    SPRITE_INSIDES,
     COUNT,
 };
 
@@ -27,9 +38,22 @@ struct AssetInfo {
     GLint texid;
 };
 
+
+struct v2f {
+    float x,y;
+};
+
 static uint8_t*     g_asset_imgs[AssetIndex::COUNT];
 static AssetInfo    g_asset_infos[AssetIndex::COUNT];
 static int          g_enabled_tex2d;
+
+static const float k_jaw_up_position   = -0.5;
+static const float k_jaw_down_position = -1.0;
+static const float kPi                 = 3.141592654f;
+
+// Jaw data
+static float g_jaw_vpos = k_jaw_down_position;
+static float g_jaw_angle;
 
 static void die_gracefully(char* msg)
 {
@@ -40,8 +64,15 @@ static void die_gracefully(char* msg)
 // Cursor position func
 static void cursor_pos_callback(GLFWwindow* win, double x, double y)
 {
-    printf("%f %f\n", x, y);
+//    printf("%f %f\n", x, y);
 }
+
+enum class ChewDir {
+    LEFT,
+    RIGHT,
+};
+
+static void chew_input(ChewDir dir);
 
 // Key callback
 static void key_callback(GLFWwindow* win, int key, int scancode, int action, int mods)
@@ -49,6 +80,13 @@ static void key_callback(GLFWwindow* win, int key, int scancode, int action, int
     if (action == GLFW_PRESS) {
         if (key == GLFW_KEY_ESCAPE) {
             g_should_quit = true;
+        }
+
+        if (key == GLFW_KEY_LEFT) {
+            chew_input(ChewDir::LEFT);
+        }
+        if (key == GLFW_KEY_RIGHT) {
+            chew_input(ChewDir::RIGHT);
         }
     }
 }
@@ -101,8 +139,75 @@ static void load_asset(AssetIndex idx, char* fname)
 static void enable_asset(AssetIndex idx)
 {
     auto texid = g_asset_infos[(int) idx].texid;
-    GLCHK (glBindTexture   (GL_TEXTURE_2D, texid));
+    GLCHK (glBindTexture (GL_TEXTURE_2D, texid));
 }
+
+static void chew_input(ChewDir dir)
+{
+    g_jaw_vpos = k_jaw_up_position;
+
+    if ( dir == ChewDir::LEFT ) {
+        g_jaw_angle -= kPi / 4;
+    }
+    if ( dir == ChewDir::RIGHT ) {
+        g_jaw_angle += kPi / 4;
+    }
+}
+
+
+static void game_tick(double dt)
+{
+
+    float height_constant = 0.05f;
+    float angle_constant  = 0.1f;
+
+    if (g_jaw_vpos > k_jaw_down_position) {
+        g_jaw_vpos -= height_constant;
+        if (g_jaw_vpos < k_jaw_down_position) {
+            g_jaw_vpos = k_jaw_down_position;
+        }
+    }
+
+
+    if ( g_jaw_angle < 0 ) {
+        g_jaw_angle += angle_constant;
+        if (g_jaw_angle > 0) {
+            g_jaw_angle = 0;
+        }
+    }
+    if ( g_jaw_angle > 0 ) {
+        g_jaw_angle -= angle_constant;
+        if (g_jaw_angle < 0) {
+            g_jaw_angle = 0;
+        }
+    }
+
+}
+
+//
+//  a ------- d
+//  |         |
+//  |        |
+//  b--------c
+//
+static void draw_sprite(AssetIndex idx,
+                        v2f a, v2f b, v2f c, v2f d)
+{
+    enable_asset(idx);
+
+    glColor3f(0,1,0);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 1);
+    glVertex3f(a.x,a.y,0);
+    glTexCoord2f(0, 0);
+    glVertex3f(b.x,b.y,0);
+    glTexCoord2f(1, 0);
+    glVertex3f(c.x,c.y,0);
+    glTexCoord2f(1, 1);
+    glVertex3f(d.x,d.y,0);
+    glEnd();
+}
+
 
 int main()
 {
@@ -153,10 +258,9 @@ int main()
 
 
     load_asset(AssetIndex::BACKGROUND, "background.png");
-    load_asset(AssetIndex::SPRITE_INSERT, "insert.png");
-    enable_asset(AssetIndex::SPRITE_INSERT);
-    enable_asset(AssetIndex::BACKGROUND);
-
+    load_asset(AssetIndex::SPRITE_JAW, "jaw.png");
+    load_asset(AssetIndex::SPRITE_HEADTOP, "headtop.png");
+    load_asset(AssetIndex::SPRITE_INSIDES, "insides.png");
 
     const char* shader_contents[2];
     shader_contents[0] =
@@ -171,6 +275,7 @@ int main()
             "   coord.y = 1.0 - coord.y;"
             "   // direct to clip space. must be in [-1, 1]^2\n"
             "   gl_Position = vec4(position, 0.0, 1.0);\n"
+            "   gl_TexCoord[0] = gl_MultiTexCoord0;"
             "}\n";
 
     shader_contents[1] =
@@ -183,7 +288,8 @@ int main()
             "void main(void)\n"
             "{\n"
             //"   vec4 color = vec4(0,0,1,1); \n"
-            "   vec4 color = texture2D(raster_buffer, coord); \n"
+            //"   vec4 color = texture2D(raster_buffer, coord); \n"
+            "   vec4 color = texture2D(raster_buffer, gl_TexCoord[0].st); \n"
             "   gl_FragColor = color; \n"
             //"   out_color = color; \n"
             "}\n";
@@ -202,22 +308,82 @@ int main()
     assert (sampler_loc >= 0);
     GLCHK (glUniform1iARB(sampler_loc, 0 /*GL_TEXTURE0*/));
 
-
+    glEnable (GL_BLEND);
+    glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 
     glClearColor(1,1,1,1);
 
+    double then = glfwGetTime();
     while (!glfwWindowShouldClose(window))
     {
+        double now = glfwGetTime();
+
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glColor3f(0,1,0);
-        glBegin(GL_QUADS);
-        glVertex3f(-1,-1,0);
-        glVertex3f(-1,1,0);
-        glVertex3f(1,1,0);
-        glVertex3f(1,-1,0);
-        glEnd();
+        float dt = now - then;
+
+        game_tick(dt);
+
+
+        // draw_sprite(AssetIndex::BACKGROUND, {-1, -1}, {-1, 1}, {1, 1}, {1, -1});
+
+        auto to_positive = [](float f) -> float {
+            float res = (f + 1)/2;
+            return res;
+        };
+
+        float left_height  = g_jaw_vpos;
+        float right_height = g_jaw_vpos;
+
+        float jaw_width = 0.4;
+        float jaw_height = 0.7;
+
+        float headtop_width = jaw_width * 1.1;
+        float headtop_height = jaw_height * 0.8;
+
+
+        v2f a = {-jaw_width, left_height};
+        v2f b = {-jaw_width, left_height + jaw_height};
+        v2f c = {jaw_width, right_height + jaw_height};
+        v2f d = {jaw_width, right_height};
+
+
+        float pendulum_height = 0.3f;
+
+        v2f center = { 0, g_jaw_vpos + (jaw_height / 2) + pendulum_height };
+
+        auto rotated = [&](v2f p, float a) -> v2f {
+            v2f res;
+
+            float c = cosf(a);
+            float s = sinf(a);
+
+            p.x -= center.x;
+            p.y -= center.y;
+
+            res.x = c*(p.x) + s*(p.y);
+            res.y = c*(p.y) - s*(p.x);
+
+            res.x += center.x;
+            res.y += center.y;
+
+            return res;
+        };
+
+        draw_sprite(AssetIndex::SPRITE_INSIDES,
+                    {-0.8f * jaw_width, g_jaw_vpos +0.7f +0.7f*jaw_height },
+                    {-0.8f * jaw_width, g_jaw_vpos +0.7f -0.7f*jaw_height },
+                    {0.8f * jaw_width,  g_jaw_vpos +0.7f -0.7f*jaw_height },
+                    {0.8f * jaw_width,  g_jaw_vpos +0.7f +0.7f*jaw_height });
+
+        draw_sprite(AssetIndex::SPRITE_JAW,
+                    rotated(a, g_jaw_angle), rotated(b, g_jaw_angle), rotated(c, g_jaw_angle), rotated(d, g_jaw_angle));
+        draw_sprite(AssetIndex::SPRITE_HEADTOP,
+                    {-headtop_width, 0.45f + -headtop_height},
+                    {-headtop_width, 0.45f +  headtop_height},
+                    {headtop_width,  0.45f +  headtop_height},
+                    {headtop_width,  0.45f + -headtop_height});
 
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -225,6 +391,8 @@ int main()
         if (g_should_quit) {
             glfwDestroyWindow(window);
         }
+
+        then = now;
     }
 
     glfwTerminate();
