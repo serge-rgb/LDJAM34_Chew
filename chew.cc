@@ -3,13 +3,33 @@
 #include <stdlib.h>
 
 #include "GL/glew.h"
-#include "glfw/glfw3.h"
 
 #define SGL_GL_HELPERS_IMPLEMENTATION
 #include "gl_helpers.h"
 
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#include "glfw/glfw3.h"
+
+
 static bool g_should_quit = false;
 
+enum class AssetIndex {
+    BACKGROUND,
+    SPRITE_INSERT,
+    COUNT,
+};
+
+struct AssetInfo {
+    int w,h,num_components;
+    GLint texid;
+};
+
+static uint8_t*     g_asset_imgs[AssetIndex::COUNT];
+static AssetInfo    g_asset_infos[AssetIndex::COUNT];
+static int          g_enabled_tex2d;
 
 static void die_gracefully(char* msg)
 {
@@ -33,6 +53,56 @@ static void key_callback(GLFWwindow* win, int key, int scancode, int action, int
     }
 }
 
+static void load_asset(AssetIndex idx, char* fname)
+{
+
+    int i = (int)idx;
+
+    int w,h,num_components;
+    uint8_t* data = stbi_load(fname, &w, &h, &num_components, 0);
+
+    if (!data) {
+        die_gracefully("Could not read file.");
+    }
+    if ( g_asset_imgs[(int)idx] != NULL ) {
+        die_gracefully("already loaded");
+    }
+
+    g_asset_infos[i].w = w;
+    g_asset_infos[i].h = h;
+    g_asset_infos[i].num_components = num_components;
+
+    g_asset_imgs[i] = data;
+
+    // Create texture
+    {
+        GLCHK (glActiveTexture (GL_TEXTURE0) );
+
+        GLuint texture = 0;
+        GLCHK (glGenTextures   (1, &texture));
+
+        assert (texture > 0);
+        g_asset_infos[i].texid = texture;
+
+        GLCHK (glBindTexture   (GL_TEXTURE_2D, texture));
+
+        GLCHK (glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+        GLCHK (glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+        GLCHK (glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        GLCHK (glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+
+        GLCHK (glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                            g_asset_infos[i].w, g_asset_infos[i].h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                            (GLvoid*)g_asset_imgs[i]));
+    }
+}
+
+
+static void enable_asset(AssetIndex idx)
+{
+    auto texid = g_asset_infos[(int) idx].texid;
+    GLCHK (glBindTexture   (GL_TEXTURE_2D, texid));
+}
 
 int main()
 {
@@ -43,8 +113,10 @@ int main()
         return -1;
     }
 
+    int win_width = 800;
+    int win_height = 600;
     /* Create a windowed mode window and its OpenGL context */
-    window = glfwCreateWindow(800, 600, "Chew Gum!!!", NULL, NULL);
+    window = glfwCreateWindow(win_width, win_height, "Chew Gum!!!", NULL, NULL);
     if (!window)
     {
         glfwTerminate();
@@ -80,6 +152,12 @@ int main()
     }
 
 
+    load_asset(AssetIndex::BACKGROUND, "background.png");
+    load_asset(AssetIndex::SPRITE_INSERT, "insert.png");
+    enable_asset(AssetIndex::SPRITE_INSERT);
+    enable_asset(AssetIndex::BACKGROUND);
+
+
     const char* shader_contents[2];
     shader_contents[0] =
             "#version 120\n"
@@ -104,7 +182,8 @@ int main()
             "\n"
             "void main(void)\n"
             "{\n"
-            "   vec4 color = vec4(0,0,1,1); \n"
+            //"   vec4 color = vec4(0,0,1,1); \n"
+            "   vec4 color = texture2D(raster_buffer, coord); \n"
             "   gl_FragColor = color; \n"
             //"   out_color = color; \n"
             "}\n";
@@ -119,12 +198,17 @@ int main()
 
     GLCHK (glUseProgramObjectARB(quad_program));
 
+    GLint sampler_loc = glGetUniformLocationARB(quad_program, "raster_buffer");
+    assert (sampler_loc >= 0);
+    GLCHK (glUniform1iARB(sampler_loc, 0 /*GL_TEXTURE0*/));
+
+
+
 
     glClearColor(1,1,1,1);
 
     while (!glfwWindowShouldClose(window))
     {
-
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         glColor3f(0,1,0);

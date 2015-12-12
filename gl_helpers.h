@@ -16,7 +16,7 @@
 #include <assert.h>
 
 #ifdef _WIN32
-#include <Windows.h>
+//#include <Windows.h>
 #endif
 
 void gl_log(char* str);
@@ -28,11 +28,7 @@ static void gl_link_program(GLuint obj, GLuint shaders[], int64_t num_shaders);
 
 void gl_log(char* str)
 {
-#ifdef _WIN32
-    OutputDebugStringA(str);
-#else
     fprintf(stderr, "%s", str);
-#endif
 }
 
 
