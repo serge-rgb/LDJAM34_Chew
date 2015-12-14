@@ -1,9 +1,12 @@
 /**
  * TODO:
- *  - Head shrink/grow
  *  - Impl pills
- *  - Impl crap
+ *      - Collision (AABB)
+ *      - Semi-random spawning.
+ *          - Same-pill auto-collide
+ *      - Remove old pills? (circular buffer might make this redundant)
  *  - Integrate stb truetype
+ *      - Print multiplier.
  *  - End state. (Print score)
  *  - Window resizing?
  *
@@ -92,10 +95,26 @@ enum class ButtonState {
     COMING_DOWN,
 };
 
+static const int k_eatable_queue_items = 16;
+static const float k_eatable_width     = 0.20;
+
+struct Eatable {
+    float value;
+    float height;
+};
+
+
+struct EatableQueue {
+    Eatable items[k_eatable_queue_items];
+    int head;
+    int tail;
+};
+
 static int g_input_flags;
 
 static const float k_normal_btn_radius = 0.20f;
 static const float k_max_btn_radius    = 0.40f;
+static const float k_eatable_speed     = 0.005f;
 
 struct GameState {
     static const float beat_length;
@@ -103,11 +122,20 @@ struct GameState {
 
     float head_scale = 1.0f;
 
-    float dt_accum;
+    float dt_accum_spawn;
+    float dt_accum_rhythm;
 
     float btn_radius[2] = { k_normal_btn_radius, k_normal_btn_radius };
 
     ButtonState btn_states[2];
+
+    union {
+        struct {
+            EatableQueue left_queue;
+            EatableQueue right_queue;
+        };
+        EatableQueue eatable_queues[2];
+    };
 };
 
 const float GameState::beat_length   = 0.005;
@@ -195,7 +223,6 @@ static void key_callback(GLFWwindow* win, int key, int scancode, int action, int
 
 static void load_image(ImageIndex idx, char* fname)
 {
-
     int i = (int)idx;
 
     int w,h,num_components;
@@ -304,6 +331,49 @@ static void enable_image(ImageIndex idx)
     GLCHK (glBindTexture (GL_TEXTURE_2D, texid));
 }
 
+//
+//  a ------- d
+//  |         |
+//  |        |
+//  b--------c
+
+static void draw_sprite(ImageIndex idx,
+                        v2f a, v2f b, v2f c, v2f d)
+{
+    enable_image(idx);
+
+    a -= g_scale_center;
+    a = a * g_scale_factor;
+    b -= g_scale_center;
+    b = b * g_scale_factor;
+    c -= g_scale_center;
+    c = c * g_scale_factor;
+    d -= g_scale_center;
+    d = d * g_scale_factor;
+
+    glColor3f(0,1,0);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 1);
+    glVertex3f(a.x,a.y,0);
+    glTexCoord2f(0, 0);
+    glVertex3f(b.x,b.y,0);
+    glTexCoord2f(1, 0);
+    glVertex3f(c.x,c.y,0);
+    glTexCoord2f(1, 1);
+    glVertex3f(d.x,d.y,0);
+    glEnd();
+}
+
+static void draw_square_sprite(ImageIndex idx, float x, float y, float w)
+{
+    float ar = (float)g_win_width / g_win_height;
+    draw_sprite(idx,
+                {x - w, y - ar*w},
+                {x - w, y + ar*w},
+                {x + w, y + ar*w},
+                {x + w, y - ar*w});
+}
+
 static void chew_input(ChewDir dir)
 {
     g_jaw_vpos = k_jaw_up_position;
@@ -316,6 +386,30 @@ static void chew_input(ChewDir dir)
     }
 }
 
+
+static void add_eatable(EatableQueue* queue, Eatable e)
+{
+    queue->items[queue->tail] = e;
+    queue->tail = (queue->tail + 1) % k_eatable_queue_items;
+}
+
+static Eatable* peek_eatable(EatableQueue* queue)
+{
+    if (queue->tail == queue->head) {
+        return NULL;
+    }
+    return &queue->items[queue->head];
+}
+
+
+static Eatable* pop_eatable(EatableQueue* queue)
+{
+    Eatable* res = peek_eatable(queue);
+
+    queue->head = (queue->head + 1) % k_eatable_queue_items;
+
+    return res;
+}
 
 static void game_tick(float dt, GameState* gs)
 {
@@ -375,49 +469,15 @@ static void game_tick(float dt, GameState* gs)
         }
     }
 
-}
+    for (int ei = 0; ei < 2; ++ei) {
+        EatableQueue* eq = &gs->eatable_queues[ei];
 
-//
-//  a ------- d
-//  |         |
-//  |        |
-//  b--------c
+        for (int i = eq->head; i != eq->tail; i = (i+1)%k_eatable_queue_items) {
+            Eatable* eatable = &eq->items[i];
+            eatable->height -= k_eatable_speed;
+        }
+    }
 
-static void draw_sprite(ImageIndex idx,
-                        v2f a, v2f b, v2f c, v2f d)
-{
-    enable_image(idx);
-
-    a -= g_scale_center;
-    a = a * g_scale_factor;
-    b -= g_scale_center;
-    b = b * g_scale_factor;
-    c -= g_scale_center;
-    c = c * g_scale_factor;
-    d -= g_scale_center;
-    d = d * g_scale_factor;
-
-    glColor3f(0,1,0);
-    glBegin(GL_QUADS);
-    glTexCoord2f(0, 1);
-    glVertex3f(a.x,a.y,0);
-    glTexCoord2f(0, 0);
-    glVertex3f(b.x,b.y,0);
-    glTexCoord2f(1, 0);
-    glVertex3f(c.x,c.y,0);
-    glTexCoord2f(1, 1);
-    glVertex3f(d.x,d.y,0);
-    glEnd();
-}
-
-static void draw_square_sprite(ImageIndex idx, float x, float y, float w)
-{
-    float ar = (float)g_win_width / g_win_height;
-    draw_sprite(idx,
-                {x - w, y - ar*w},
-                {x - w, y + ar*w},
-                {x + w, y + ar*w},
-                {x + w, y - ar*w});
 }
 
 static void game_render(float dt, GameState* gs)
@@ -491,15 +551,35 @@ static void game_render(float dt, GameState* gs)
     // End of Render Face
     ////////////////////////////////////////////////////////////
 
-    gs->dt_accum += dt;
-    if (gs->dt_accum < GameState::rhythm_period - GameState::beat_length) {
+
+
+    // Render collision circles with flash.
+
+    gs->dt_accum_rhythm += dt;
+    if (gs->dt_accum_rhythm < GameState::rhythm_period - GameState::beat_length) {
         draw_square_sprite(ImageIndex::CIRCLE,
                            -0.65, -0.7, gs->btn_radius[0]);
         draw_square_sprite(ImageIndex::CIRCLE,
                            0.65, -0.7, gs->btn_radius[1]);
-    } else if (gs->dt_accum > GameState::rhythm_period) {
-        gs->dt_accum = 0;
+    } else if (gs->dt_accum_rhythm > GameState::rhythm_period) {
+        gs->dt_accum_rhythm = 0;
     }
+
+
+
+    // Render eatable queues
+    for (int ei = 0; ei < 2; ++ei) {
+        EatableQueue* eq = &gs->eatable_queues[ei];
+
+        for (int i = eq->head; i != eq->tail; i = (i+1)%k_eatable_queue_items) {
+            Eatable* eatable = &eq->items[i];
+            draw_square_sprite(ImageIndex::GUM_ORANGE,
+                               (ei == 0) ? -0.7 : 0.7,  // left or right.
+                               eatable->height,
+                               k_eatable_width);
+        }
+    }
+
 }
 
 
@@ -516,8 +596,7 @@ int main()
     g_win_height = 600;
     /* Create a windowed mode window and its OpenGL context */
     window = glfwCreateWindow(g_win_width, g_win_height, "Chew Gum!!!", NULL, NULL);
-    if (!window)
-    {
+    if (!window) {
         glfwTerminate();
         return -1;
     }
@@ -623,12 +702,16 @@ int main()
                                 push_audio(0, AudioIndex::DUKE);
                             });
 
-    //std::atomic_thread_fence(std::memory_order_seq_cst);
+
     duke_thread.detach();
 
     double then = glfwGetTime();
 
     GameState gs = {};
+
+
+    Eatable e = { 0.1f, 0.7f };
+    add_eatable(&gs.right_queue, e);
 
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
