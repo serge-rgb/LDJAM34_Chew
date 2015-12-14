@@ -16,31 +16,48 @@ static paTestData data;
 
 static PaStream *g_stream;
 
+enum class ItemEndBehavior {
+    NEXT_ELEM,
+    REPEAT,
+};
+
 /* // Assumed to be stereo at 44100 */
 struct SampleQueueItem {
     short* samples;
     int playback_position;
     int num_samples;
+    ItemEndBehavior behavior;
 };
 
 static const int k_max_samples_queued = 1024;
 
-// Might turn this into a FIFO, but stacks are simpler and game is simple...
-struct AudioStack {
+struct AudioQueue {
     SampleQueueItem items[k_max_samples_queued];
-    int count;
+    int head;
+    int tail;
 };
 
-static AudioStack g_audio_stack;
+static AudioQueue g_audio_queue;
 
-static void sgl_PA_push_sample(short* samples, int num_samples)
+static void sgl_PA_push_sample(short* samples, int num_samples, int n_loops = 1)
 {
-    SampleQueueItem it;
-    it.samples = samples;
-    it.num_samples = num_samples;
-    it.playback_position = 0;
-    g_audio_stack.items[g_audio_stack.count++] = it;
+    auto add_elem = [&](ItemEndBehavior b) {
+        SampleQueueItem it;
+        it.samples = samples;
+        it.num_samples = num_samples;
+        it.playback_position = 0;
+        it.behavior = b;
+        g_audio_queue.items[g_audio_queue.tail] = it;
+        g_audio_queue.tail = g_audio_queue.tail + 1 % k_max_samples_queued;
+    };
 
+    for (int i = 0; i < n_loops; ++i) {
+        add_elem(ItemEndBehavior::NEXT_ELEM);
+    }
+    // Forever
+    if ( n_loops == -1 ) {
+        add_elem(ItemEndBehavior::REPEAT);
+    }
 }
 
 /* This routine will be called by the PortAudio engine when audio is needed.
@@ -57,21 +74,20 @@ static int sgl_PA_Callback( const void *inputBuffer, void *outputBuffer,
     /* UNUSED(userData); */
     /* Cast data passed through stream to our structure. */
     paTestData *data = (paTestData*)userData;
-    /* if (g_audio_stack.count == 0) */
+    /* if (g_audio_queue.count == 0) */
     /*     goto end; */
 
     float *out = (float*)outputBuffer;
     unsigned int i;
     (void) inputBuffer; /* Prevent unused variable warning. */
 
-    if (!g_audio_stack.count) {
+    if (g_audio_queue.tail == g_audio_queue.head) {
         for( i=0; i < framesPerBuffer; i++ ) {
             *out++ = 0;
             *out++ = 0;
         }
-    }
-    for ( int ai = 0; ai < g_audio_stack.count; ++ ai ) {
-        SampleQueueItem* qitem = &g_audio_stack.items[g_audio_stack.count - 1];
+    } else { //  }for ( int ai = 0; ai < g_audio_queue.count; ++ ai ) {
+        SampleQueueItem* qitem = &g_audio_queue.items[g_audio_queue.head];
         for( i=0; i < framesPerBuffer; i++ ) {
             if (qitem && qitem->num_samples) {
                 auto* samples = qitem->samples;
@@ -86,15 +102,23 @@ static int sgl_PA_Callback( const void *inputBuffer, void *outputBuffer,
 
                 assert  (qitem->num_samples*2 >= qitem->playback_position);
                 if ( qitem->num_samples*2 == qitem->playback_position ) {
-                    g_audio_stack.count -= 1;  // -1 (the one we consumed)
-                    if (g_audio_stack.count == 0) {
-                        qitem = NULL;
-                    } else {
-                        qitem = &g_audio_stack.items[g_audio_stack.count];
+                    // Consumed one
+                    switch (qitem->behavior) {
+                    case ItemEndBehavior::NEXT_ELEM: {
+                            g_audio_queue.head = (g_audio_queue.head + 1) % k_max_samples_queued;
+                            if (g_audio_queue.head == g_audio_queue.tail) {
+                                qitem = NULL;
+                            } else {
+                                qitem = &g_audio_queue.items[g_audio_queue.head];
+                            }
+                        }
+                    case ItemEndBehavior::REPEAT: {
+                        qitem->playback_position = 0;
+                    }
                     }
                 }
             } else {
-                // Probably will cause some clipping, fix.
+                // Probably will cause some clipping, fix???
                 *out++ = 0;
                 *out++ = 0;
             }

@@ -43,8 +43,14 @@ enum class ImageIndex {
 
 enum class AudioIndex {
     START,
+    LOOP,
 
     COUNT,
+};
+
+enum class AudioOpts {
+    NOTHING,
+    LOOP_FOREVER,
 };
 
 struct ImageInfo {
@@ -156,7 +162,7 @@ static void load_image(ImageIndex idx, char* fname)
     }
 }
 
-static void load_audio(AudioIndex idx, char* fname)
+static void load_audio(AudioIndex idx, char* fname, int sample_padding = 0)
 {
     int i = (int)idx;
     if (g_audio_items[i].samples != NULL) {
@@ -172,6 +178,18 @@ static void load_audio(AudioIndex idx, char* fname)
         die_gracefully("stb vorbis could not open or decode");
     }
 
+    if ( sample_padding ) {
+        size_t new_size = (num_samples*num_channels + sample_padding*num_channels) * sizeof(short);
+        short* new_samples = (short*)calloc(1, new_size);
+        if (!new_samples) {
+            die_gracefully("could not allocate memory for sample padding ");
+        }
+        memcpy(new_samples, samples, num_samples*num_channels * sizeof(short));
+        free(samples);
+        samples = new_samples;
+        num_samples = num_samples + sample_padding;
+    }
+
     // These assumptions might change later, so data structures still keep the info..
     assert ( num_channels == 2 );
     assert ( sample_rate == 44100 );
@@ -181,10 +199,28 @@ static void load_audio(AudioIndex idx, char* fname)
     g_audio_items[i].rate = sample_rate;
     g_audio_items[i].num_channels = num_channels;
     g_audio_items[i].num_samples = num_samples;
+}
 
+static void push_audio(AudioIndex idx, AudioOpts opts = AudioOpts::NOTHING)
+{
+    int i = (int)idx;
+    AudioInfo* ai = &g_audio_items[i];
 
-    // TEST. Push audio
-    sgl_PA_push_sample(samples, num_samples);
+    if (!ai->samples) {
+        die_gracefully("audio not loaded.");
+    }
+
+    switch ( opts ) {
+    case AudioOpts::NOTHING:
+        sgl_PA_push_sample(ai->samples, ai->num_samples);
+        break;
+    case AudioOpts::LOOP_FOREVER:
+        sgl_PA_push_sample(ai->samples, ai->num_samples, -1);
+        break;
+    default:
+        assert ("not implemented\n");
+    }
+
 }
 
 
@@ -383,6 +419,7 @@ int main()
     load_image(ImageIndex::SPRITE_HEADTOP, "headtop.png");
     load_image(ImageIndex::SPRITE_INSIDES, "insides.png");
     load_audio(AudioIndex::START, "start.ogg");
+    load_audio(AudioIndex::LOOP, "loop.ogg", /*padding*/44100/16);
 
     const char* shader_contents[2];
     shader_contents[0] =
@@ -435,6 +472,10 @@ int main()
 
 
     glClearColor(1,1,1,1);
+
+    // Push d7samurais Duke Nukem quote remix of awesomeness.
+    push_audio(AudioIndex::START);
+    push_audio(AudioIndex::LOOP, AudioOpts::LOOP_FOREVER);
 
     double then = glfwGetTime();
     while (!glfwWindowShouldClose(window))
