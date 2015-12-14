@@ -10,11 +10,15 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+static void die_gracefully(char* msg);
 
-#include "GL/glew.h"
+#include <glew.h>
+#include <portaudio.h>
 
 #define SGL_GL_HELPERS_IMPLEMENTATION
 #include "gl_helpers.h"
+
+#include "portaudio_helpers.h"
 
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -23,6 +27,8 @@
 #include "stb_vorbis.c"
 
 #include "glfw/glfw3.h"
+
+
 
 
 static bool g_should_quit = false;
@@ -166,11 +172,19 @@ static void load_audio(AudioIndex idx, char* fname)
         die_gracefully("stb vorbis could not open or decode");
     }
 
+    // These assumptions might change later, so data structures still keep the info..
+    assert ( num_channels == 2 );
+    assert ( sample_rate == 44100 );
+
     // We are good to go.
     g_audio_items[i].samples = samples;
     g_audio_items[i].rate = sample_rate;
     g_audio_items[i].num_channels = num_channels;
     g_audio_items[i].num_samples = num_samples;
+
+
+    // TEST. Push audio
+    sgl_PA_push_sample(samples, num_samples);
 }
 
 
@@ -362,6 +376,7 @@ int main()
         die_gracefully("OpenGL 1.4 not supported.\n");
     }
 
+    sgl_init_PA();
 
     load_image(ImageIndex::BACKGROUND, "background.png");
     load_image(ImageIndex::SPRITE_JAW, "jaw.png");
@@ -445,6 +460,7 @@ int main()
         then = now;
     }
 
+    sgl_deinit_PA();
     glfwTerminate();
     return 0;
 }
