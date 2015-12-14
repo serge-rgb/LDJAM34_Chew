@@ -53,6 +53,7 @@ enum class ImageIndex {
     INSIDES,
     CIRCLE,
     GUM_ORANGE,
+    GUM_BLUE,
     TOOTH,
     COUNT,
 };
@@ -98,11 +99,17 @@ enum class ButtonState {
 static const int k_eatable_queue_items = 16;
 static const float k_eatable_width     = 0.20;
 
+enum class EatableColor {
+    ORANGE,
+    BLUE,
+    COUNT,
+};
+
 struct Eatable {
     float value;
     float height;
+    EatableColor color;
 };
-
 
 struct EatableQueue {
     Eatable items[k_eatable_queue_items];
@@ -110,17 +117,24 @@ struct EatableQueue {
     int tail;
 };
 
+
 static int g_input_flags;
 
-static const float k_normal_btn_radius = 0.20f;
-static const float k_max_btn_radius    = 0.40f;
-static const float k_eatable_speed     = 0.005f;
+static const float k_btn_y                = -0.70f;
+static const float k_btn_x_from_center    = 0.65f;
+static const float k_normal_btn_radius    = 0.20f;
+static const float k_max_btn_radius       = 0.40f;
+static const float k_eatable_speed        = 0.010f;
+static const float k_eatable_begin_y      = 0.90f;
+
+static const float k_default_shrink_speed = 0.001f;
 
 struct GameState {
     static const float beat_length;
     static const float rhythm_period;
 
     float head_scale = 1.0f;
+    float shrink_speed = k_default_shrink_speed;
 
     float dt_accum_spawn;
     float dt_accum_rhythm;
@@ -136,6 +150,9 @@ struct GameState {
         };
         EatableQueue eatable_queues[2];
     };
+
+    EatableColor last_color = EatableColor::COUNT;
+    bool is_spree;
 };
 
 const float GameState::beat_length   = 0.005;
@@ -319,7 +336,7 @@ static void push_audio(int queue_i, AudioIndex idx, AudioOpts opts = AudioOpts::
         audio_push_sample(queue_i, ai->samples, ai->num_samples, -1);
         break;
     default:
-        assert ("not implemented\n");
+        assert (!"not implemented\n");
     }
 
 }
@@ -374,6 +391,17 @@ static void draw_square_sprite(ImageIndex idx, float x, float y, float w)
                 {x + w, y - ar*w});
 }
 
+static bool collide_squares(float x1, float y1, float w1,
+                            float x2, float y2, float w2)
+{
+    bool not =
+            (x2 > x1 + w1) ||
+            (y2 > y1 + w1) ||
+            (y2 + w2 < y1) ||
+            (x2 + w2 < x1);
+    return !not;
+}
+
 static void chew_input(ChewDir dir)
 {
     g_jaw_vpos = k_jaw_up_position;
@@ -413,11 +441,8 @@ static Eatable* pop_eatable(EatableQueue* queue)
 
 static void game_tick(float dt, GameState* gs)
 {
-    gs->head_scale -= 0.001f;
+    gs->dt_accum_spawn += dt;
 
-    if ( gs->head_scale <= 0.001f ) {
-        gs->head_scale = 1;
-    }
 
     if (g_input_flags & GOT_LEFT) {
         gs->btn_states[0] = ButtonState::GOING_UP;
@@ -469,13 +494,108 @@ static void game_tick(float dt, GameState* gs)
         }
     }
 
+    float spawn_threshold = 1.5f;
+
+    // Spawn?
+    if ( gs->dt_accum_spawn >  spawn_threshold) {
+        gs->dt_accum_spawn = 0;
+        int side = rand() % 2;
+
+        EatableColor color = (EatableColor)(rand() % (int)EatableColor::COUNT);
+
+        float value = 0.0f;
+        switch ( color ) {
+        case EatableColor::ORANGE:
+            value = 1.0f;
+            break;
+        case EatableColor::BLUE:
+            value = 1.0f;
+            break;
+        default:
+            assert (!"nope");
+            break;
+        }
+        Eatable e = { value, k_eatable_begin_y, color};
+        add_eatable(&gs->eatable_queues[side], e);
+    }
+
+
+    // Iterate through eatables.
+
     for (int ei = 0; ei < 2; ++ei) {
         EatableQueue* eq = &gs->eatable_queues[ei];
-
-        for (int i = eq->head; i != eq->tail; i = (i+1)%k_eatable_queue_items) {
+        bool collided = false;
+        for (int i = eq->head; !collided && i != eq->tail; i = (i+1)%k_eatable_queue_items) {
             Eatable* eatable = &eq->items[i];
+
+            // Make eatables fall
             eatable->height -= k_eatable_speed;
+
+            // Collide against respective circles.
+            if ( gs->btn_states[ei] != ButtonState::NORMAL ) {
+                float btn_x = ei == 0? -k_btn_x_from_center : k_btn_x_from_center;
+                float btn_y = k_btn_y;
+#if 1
+                float btn_w = k_normal_btn_radius;
+#else
+                float btn_w = gs->btn_radius[ei];
+#endif
+
+                float eat_x = btn_x;
+                float eat_y = eatable->height;
+                float eat_w = k_eatable_width;
+
+                if ( collide_squares(btn_x, btn_y, btn_w,
+                                     eat_x, eat_y, eat_w) ) {
+
+                    float factor = 1;
+                    switch ( eatable->color ) {
+                    case EatableColor::ORANGE:
+                        if ( gs->shrink_speed > 0 )
+                            gs->shrink_speed += k_default_shrink_speed;
+                        else
+                            gs->shrink_speed = k_default_shrink_speed;
+                        printf("Collide: Orange ( %f )\n", gs->shrink_speed);
+                        //gs->head_scale += 0.05f;
+                        break;
+                    case EatableColor::BLUE:
+                        if ( gs->shrink_speed < 0 )
+                            gs->shrink_speed -= k_default_shrink_speed;
+                        else
+                            gs->shrink_speed = -k_default_shrink_speed;
+                        printf("Collide: Blue ( %f )\n", gs->shrink_speed);
+                        //gs->head_scale -= 0.05f;
+                        break;
+
+                    }
+                    /*
+                    if ( gs->last_color == eatable->color ) {
+                        factor = 4;
+                        gs->shrink_speed += 0.0005f;
+                        gs->is_spree = true;
+                    } else {
+                        // If leaving spree, slow down shrinking
+                        if (gs->is_spree) {
+                            gs->shrink_speed -= 0.002f;
+                        }
+                        gs->is_spree = false;
+                    }
+                    */
+                    gs->head_scale *= eatable->value;
+                    pop_eatable(eq);
+                    gs->last_color = eatable->color;
+                    collided = true;
+                }
+            }
         }
+    }
+
+    // Seems to be more challenging when growth is non-linear.
+    gs->head_scale -= gs->shrink_speed; // * gs->head_scale;
+    if ( gs->head_scale <= 0.001f || gs->head_scale > 2.0f ) {
+        gs->head_scale = 1;
+        gs->shrink_speed = k_default_shrink_speed;
+        printf("===== DEAD ======\n");
     }
 
 }
@@ -558,14 +678,12 @@ static void game_render(float dt, GameState* gs)
     gs->dt_accum_rhythm += dt;
     if (gs->dt_accum_rhythm < GameState::rhythm_period - GameState::beat_length) {
         draw_square_sprite(ImageIndex::CIRCLE,
-                           -0.65, -0.7, gs->btn_radius[0]);
+                           -k_btn_x_from_center, k_btn_y, gs->btn_radius[0]);
         draw_square_sprite(ImageIndex::CIRCLE,
-                           0.65, -0.7, gs->btn_radius[1]);
+                           k_btn_x_from_center, k_btn_y, gs->btn_radius[1]);
     } else if (gs->dt_accum_rhythm > GameState::rhythm_period) {
         gs->dt_accum_rhythm = 0;
     }
-
-
 
     // Render eatable queues
     for (int ei = 0; ei < 2; ++ei) {
@@ -573,13 +691,24 @@ static void game_render(float dt, GameState* gs)
 
         for (int i = eq->head; i != eq->tail; i = (i+1)%k_eatable_queue_items) {
             Eatable* eatable = &eq->items[i];
-            draw_square_sprite(ImageIndex::GUM_ORANGE,
-                               (ei == 0) ? -0.7 : 0.7,  // left or right.
+            ImageIndex img_idx;
+            switch (eatable->color) {
+            case EatableColor::ORANGE:
+                img_idx = ImageIndex::GUM_ORANGE;
+                break;
+            case EatableColor::BLUE:
+                img_idx = ImageIndex::GUM_BLUE;
+                break;
+            default:
+                assert (!"not implemented");
+                break;
+            }
+            draw_square_sprite(img_idx,
+                               (ei == 0) ? -k_btn_x_from_center : k_btn_x_from_center,  // left or right.
                                eatable->height,
                                k_eatable_width);
         }
     }
-
 }
 
 
@@ -637,6 +766,7 @@ int main()
     load_image(ImageIndex::INSIDES, "insides.png");
     load_image(ImageIndex::CIRCLE, "circle.png");
     load_image(ImageIndex::GUM_ORANGE, "gum_orange.png");
+    load_image(ImageIndex::GUM_BLUE, "gum_blue.png");
 
     load_audio(AudioIndex::DUKE, "duke.ogg");
     load_audio(AudioIndex::LOOP, "loop.ogg", /*padding*/44100/16);
@@ -708,10 +838,6 @@ int main()
     double then = glfwGetTime();
 
     GameState gs = {};
-
-
-    Eatable e = { 0.1f, 0.7f };
-    add_eatable(&gs.right_queue, e);
 
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
