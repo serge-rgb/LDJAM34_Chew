@@ -1,20 +1,7 @@
-#pragma once
+
+#include <portaudio.h>
 
 #include <limits.h>
-
-#ifndef UNUSED
-#define UNUSED(x) (void*)&(x)
-#endif
-
-static void sgl_init_PA();
-
-struct paTestData {
-    float left_phase;
-    float right_phase;
-};
-static paTestData data;
-
-static PaStream *g_stream;
 
 enum class ItemEndBehavior {
     NEXT_ELEM,
@@ -26,7 +13,7 @@ struct SampleQueueItem {
     short* samples;
     int playback_position;
     int num_samples;
-    ItemEndBehavior behavior;
+    ItemEndBehavior end_behavior;
 };
 
 static const int k_max_samples_queued = 1024;
@@ -36,29 +23,8 @@ struct AudioQueue {
     int head;
     int tail;
 };
-
 static AudioQueue g_audio_queue;
-
-static void sgl_PA_push_sample(short* samples, int num_samples, int n_loops = 1)
-{
-    auto add_elem = [&](ItemEndBehavior b) {
-        SampleQueueItem it;
-        it.samples = samples;
-        it.num_samples = num_samples;
-        it.playback_position = 0;
-        it.behavior = b;
-        g_audio_queue.items[g_audio_queue.tail] = it;
-        g_audio_queue.tail = g_audio_queue.tail + 1 % k_max_samples_queued;
-    };
-
-    for (int i = 0; i < n_loops; ++i) {
-        add_elem(ItemEndBehavior::NEXT_ELEM);
-    }
-    // Forever
-    if ( n_loops == -1 ) {
-        add_elem(ItemEndBehavior::REPEAT);
-    }
-}
+static PaStream *g_stream;
 
 /* This routine will be called by the PortAudio engine when audio is needed.
  ** It may called at interrupt level on some machines so don't do anything
@@ -70,13 +36,6 @@ static int sgl_PA_Callback( const void *inputBuffer, void *outputBuffer,
                            PaStreamCallbackFlags statusFlags,
                            void *userData )
 {
-    static float dt = 0.0f;
-    /* UNUSED(userData); */
-    /* Cast data passed through stream to our structure. */
-    paTestData *data = (paTestData*)userData;
-    /* if (g_audio_queue.count == 0) */
-    /*     goto end; */
-
     float *out = (float*)outputBuffer;
     unsigned int i;
     (void) inputBuffer; /* Prevent unused variable warning. */
@@ -103,7 +62,7 @@ static int sgl_PA_Callback( const void *inputBuffer, void *outputBuffer,
                 assert  (qitem->num_samples*2 >= qitem->playback_position);
                 if ( qitem->num_samples*2 == qitem->playback_position ) {
                     // Consumed one
-                    switch (qitem->behavior) {
+                    switch (qitem->end_behavior) {
                     case ItemEndBehavior::NEXT_ELEM: {
                             g_audio_queue.head = (g_audio_queue.head + 1) % k_max_samples_queued;
                             if (g_audio_queue.head == g_audio_queue.tail) {
@@ -128,14 +87,31 @@ end:
     return 0;
 }
 
-static void sgl_init_PA()
+void audio_push_sample(short* samples, int num_samples, int n_loops)
+{
+    auto add_elem = [&](ItemEndBehavior b) {
+        SampleQueueItem it;
+        it.samples = samples;
+        it.num_samples = num_samples;
+        it.playback_position = 0;
+        it.end_behavior = b;
+        g_audio_queue.items[g_audio_queue.tail] = it;
+        g_audio_queue.tail = g_audio_queue.tail + 1 % k_max_samples_queued;
+    };
+
+    for (int i = 0; i < n_loops; ++i) {
+        add_elem(ItemEndBehavior::NEXT_ELEM);
+    }
+    // Forever
+    if ( n_loops == -1 ) {
+        add_elem(ItemEndBehavior::REPEAT);
+    }
+}
+
+void audio_init()
 {
     PaError err;
 
-    printf("PortAudio Test: output sawtooth wave.\n");
-    /* Initialize our data for use by callback. */
-    data.left_phase = data.right_phase = 0.0;
-    /* Initialize library before making any other calls. */
     err = Pa_Initialize();
     if( err != paNoError ) goto error;
 
@@ -147,7 +123,7 @@ static void sgl_init_PA()
                                44100,
                                256,        /* frames per buffer */
                                sgl_PA_Callback,
-                               &data);
+                               NULL);
     if( err != paNoError ) goto error;
 
     err = Pa_StartStream( g_stream );
@@ -162,7 +138,7 @@ error:
     die_gracefully("something went wrong initting pulse audio\n");
 }
 
-static void sgl_deinit_PA()
+void audio_deinit()
 {
     PaError err = paNoError;
     err = Pa_StopStream( g_stream );

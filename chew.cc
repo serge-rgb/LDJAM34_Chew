@@ -13,22 +13,20 @@
 static void die_gracefully(char* msg);
 
 #include <glew.h>
-#include <portaudio.h>
 
 #define SGL_GL_HELPERS_IMPLEMENTATION
 #include "gl_helpers.h"
 
-#include "portaudio_helpers.h"
+#include "audio.h"
+#include "audio.cc"
 
 
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include "stb/stb_image.h"
 
-#include "stb_vorbis.c"
+#include "stb/stb_vorbis.c"
 
 #include "glfw/glfw3.h"
-
-
 
 
 static bool g_should_quit = false;
@@ -38,11 +36,12 @@ enum class ImageIndex {
     SPRITE_JAW,
     SPRITE_HEADTOP,
     SPRITE_INSIDES,
+    SPRITE_CIRCLE,
     COUNT,
 };
 
 enum class AudioIndex {
-    START,
+    DUKE,
     LOOP,
 
     COUNT,
@@ -70,6 +69,41 @@ struct AudioInfo {
 struct v2f {
     float x,y;
 };
+
+
+enum InputFlags {
+    NONE,
+    GOT_LEFT  = 1 << 0,
+    GOT_RIGHT = 1 << 1,
+};
+
+enum class ButtonState {
+    NORMAL,
+    GOING_UP,
+    COMING_DOWN,
+};
+
+static int g_input_flags;
+
+static const float k_normal_btn_radius = 0.20f;
+static const float k_max_btn_radius    = 0.40f;
+
+struct GameState {
+    static const float beat_length;
+    static const float rhythm_period;
+
+    float dt_accum;
+
+    float btn_radius[2] = { k_normal_btn_radius, k_normal_btn_radius };
+
+    ButtonState btn_states[2];
+};
+
+const float GameState::beat_length   = 0.005;
+const float GameState::rhythm_period = 0.28571428;
+
+static int g_win_width;
+static int g_win_height;
 
 static ImageInfo    g_image_info[ImageIndex::COUNT];
 static AudioInfo    g_audio_items[AudioIndex::COUNT];
@@ -112,9 +146,11 @@ static void key_callback(GLFWwindow* win, int key, int scancode, int action, int
 
         if (key == GLFW_KEY_LEFT) {
             chew_input(ChewDir::LEFT);
+            g_input_flags |= GOT_LEFT;
         }
         if (key == GLFW_KEY_RIGHT) {
             chew_input(ChewDir::RIGHT);
+            g_input_flags |= GOT_RIGHT;
         }
     }
 }
@@ -212,10 +248,10 @@ static void push_audio(AudioIndex idx, AudioOpts opts = AudioOpts::NOTHING)
 
     switch ( opts ) {
     case AudioOpts::NOTHING:
-        sgl_PA_push_sample(ai->samples, ai->num_samples);
+        audio_push_sample(ai->samples, ai->num_samples);
         break;
     case AudioOpts::LOOP_FOREVER:
-        sgl_PA_push_sample(ai->samples, ai->num_samples, -1);
+        audio_push_sample(ai->samples, ai->num_samples, -1);
         break;
     default:
         assert ("not implemented\n");
@@ -243,8 +279,34 @@ static void chew_input(ChewDir dir)
 }
 
 
-static void game_tick(float dt)
+static void game_tick(float dt, GameState* gs)
 {
+
+    if (g_input_flags & GOT_LEFT) {
+        gs->btn_states[0] = ButtonState::GOING_UP;
+        g_input_flags ^= GOT_LEFT;
+    }
+    if (g_input_flags & GOT_RIGHT) {
+        gs->btn_states[1] = ButtonState::GOING_UP;
+        g_input_flags ^= GOT_RIGHT;
+    }
+
+    float btn_shape_change = 0.1f;
+
+    for (int i = 0; i < 2; ++i) {
+        if ( gs->btn_states[i] == ButtonState::GOING_UP ) {
+            gs->btn_radius[i] += btn_shape_change;
+            if ( gs->btn_radius[i] > k_max_btn_radius ) {
+                gs->btn_states[i] = ButtonState::COMING_DOWN;
+            }
+        } else if  (gs -> btn_states[i] == ButtonState::COMING_DOWN ) {
+            gs->btn_radius[i] -= btn_shape_change;
+            if ( gs->btn_radius[i] <= k_normal_btn_radius ) {
+                gs->btn_radius[i] = k_normal_btn_radius;
+                gs->btn_states[i] = ButtonState::NORMAL;
+            }
+        }
+    }
 
     float height_constant = 0.05f;
     float angle_constant  = 0.1f;
@@ -277,7 +339,7 @@ static void game_tick(float dt)
 //  |         |
 //  |        |
 //  b--------c
-//
+
 static void draw_sprite(ImageIndex idx,
                         v2f a, v2f b, v2f c, v2f d)
 {
@@ -296,14 +358,18 @@ static void draw_sprite(ImageIndex idx,
     glEnd();
 }
 
-static void draw_circle()
+static void draw_square_sprite(ImageIndex idx, float x, float y, float w)
 {
-
+    float ar = (float)g_win_width / g_win_height;
+    draw_sprite(idx,
+                {x - w, y - ar*w},
+                {x - w, y + ar*w},
+                {x + w, y + ar*w},
+                {x + w, y - ar*w});
 }
 
-static void game_render()
+static void game_render(float dt, GameState* gs)
 {
-    // draw_sprite(ImageIndex::BACKGROUND, {-1, -1}, {-1, 1}, {1, 1}, {1, -1});
 
     auto to_positive = [](float f) -> float {
         float res = (f + 1)/2;
@@ -327,6 +393,9 @@ static void game_render()
 
 
     float pendulum_height = 0.3f;
+
+    ////////////////////////////////////////////////////////////
+    // Render face
 
     v2f center = { 0, g_jaw_vpos + (jaw_height / 2) + pendulum_height };
 
@@ -362,6 +431,19 @@ static void game_render()
                 {-headtop_width, 0.45f +  headtop_height},
                 {headtop_width,  0.45f +  headtop_height},
                 {headtop_width,  0.45f + -headtop_height});
+
+    // End of Render Face
+    ////////////////////////////////////////////////////////////
+
+    gs->dt_accum += dt;
+    if (gs->dt_accum < GameState::rhythm_period - GameState::beat_length) {
+        draw_square_sprite(ImageIndex::SPRITE_CIRCLE,
+                           -0.65, -0.7, gs->btn_radius[0]);
+        draw_square_sprite(ImageIndex::SPRITE_CIRCLE,
+                           0.65, -0.7, gs->btn_radius[1]);
+    } else if (gs->dt_accum > GameState::rhythm_period) {
+        gs->dt_accum = 0;
+    }
 }
 
 
@@ -374,10 +456,10 @@ int main()
         return -1;
     }
 
-    int win_width = 800;
-    int win_height = 600;
+    g_win_width = 800;
+    g_win_height = 600;
     /* Create a windowed mode window and its OpenGL context */
-    window = glfwCreateWindow(win_width, win_height, "Chew Gum!!!", NULL, NULL);
+    window = glfwCreateWindow(g_win_width, g_win_height, "Chew Gum!!!", NULL, NULL);
     if (!window)
     {
         glfwTerminate();
@@ -412,13 +494,15 @@ int main()
         die_gracefully("OpenGL 1.4 not supported.\n");
     }
 
-    sgl_init_PA();
+    audio_init();
 
     load_image(ImageIndex::BACKGROUND, "background.png");
     load_image(ImageIndex::SPRITE_JAW, "jaw.png");
     load_image(ImageIndex::SPRITE_HEADTOP, "headtop.png");
     load_image(ImageIndex::SPRITE_INSIDES, "insides.png");
-    load_audio(AudioIndex::START, "start.ogg");
+    load_image(ImageIndex::SPRITE_CIRCLE, "circle.png");
+
+    load_audio(AudioIndex::DUKE, "duke.ogg");
     load_audio(AudioIndex::LOOP, "loop.ogg", /*padding*/44100/16);
 
     const char* shader_contents[2];
@@ -473,22 +557,24 @@ int main()
 
     glClearColor(1,1,1,1);
 
-    // Push d7samurais Duke Nukem quote remix of awesomeness.
-    push_audio(AudioIndex::START);
+    // Push d7samurai's Duke Nukem quote remix of awesomeness.
+    push_audio(AudioIndex::DUKE);
     push_audio(AudioIndex::LOOP, AudioOpts::LOOP_FOREVER);
 
     double then = glfwGetTime();
-    while (!glfwWindowShouldClose(window))
-    {
+
+    GameState gs;
+
+    while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         float dt = now - then;
 
-        game_tick(dt);
+        game_tick(dt, &gs);
 
-        game_render();
+        game_render(dt, &gs);
 
 
         glfwSwapBuffers(window);
@@ -501,7 +587,7 @@ int main()
         then = now;
     }
 
-    sgl_deinit_PA();
+    audio_deinit();
     glfwTerminate();
     return 0;
 }
