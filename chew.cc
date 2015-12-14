@@ -20,12 +20,14 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#include "stb_vorbis.c"
+
 #include "glfw/glfw3.h"
 
 
 static bool g_should_quit = false;
 
-enum class AssetIndex {
+enum class ImageIndex {
     BACKGROUND,
     SPRITE_JAW,
     SPRITE_HEADTOP,
@@ -33,9 +35,23 @@ enum class AssetIndex {
     COUNT,
 };
 
-struct AssetInfo {
+enum class AudioIndex {
+    START,
+
+    COUNT,
+};
+
+struct ImageInfo {
     int w,h,num_components;
+    uint8_t* bits;
     GLint texid;
+};
+
+struct AudioInfo {
+    int num_channels;
+    int rate;
+    int num_samples;
+    short* samples;
 };
 
 
@@ -43,8 +59,8 @@ struct v2f {
     float x,y;
 };
 
-static uint8_t*     g_asset_imgs[AssetIndex::COUNT];
-static AssetInfo    g_asset_infos[AssetIndex::COUNT];
+static ImageInfo    g_image_info[ImageIndex::COUNT];
+static AudioInfo    g_audio_items[AudioIndex::COUNT];
 static int          g_enabled_tex2d;
 
 static const float k_jaw_up_position   = -0.5;
@@ -91,7 +107,7 @@ static void key_callback(GLFWwindow* win, int key, int scancode, int action, int
     }
 }
 
-static void load_asset(AssetIndex idx, char* fname)
+static void load_image(ImageIndex idx, char* fname)
 {
 
     int i = (int)idx;
@@ -102,15 +118,14 @@ static void load_asset(AssetIndex idx, char* fname)
     if (!data) {
         die_gracefully("Could not read file.");
     }
-    if ( g_asset_imgs[(int)idx] != NULL ) {
+    if ( g_image_info[(int)idx].bits != NULL ) {
         die_gracefully("already loaded");
     }
 
-    g_asset_infos[i].w = w;
-    g_asset_infos[i].h = h;
-    g_asset_infos[i].num_components = num_components;
-
-    g_asset_imgs[i] = data;
+    g_image_info[i].w = w;
+    g_image_info[i].h = h;
+    g_image_info[i].num_components = num_components;
+    g_image_info[i].bits = data;
 
     // Create texture
     {
@@ -120,7 +135,7 @@ static void load_asset(AssetIndex idx, char* fname)
         GLCHK (glGenTextures   (1, &texture));
 
         assert (texture > 0);
-        g_asset_infos[i].texid = texture;
+        g_image_info[i].texid = texture;
 
         GLCHK (glBindTexture   (GL_TEXTURE_2D, texture));
 
@@ -130,15 +145,38 @@ static void load_asset(AssetIndex idx, char* fname)
         GLCHK (glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
 
         GLCHK (glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                            g_asset_infos[i].w, g_asset_infos[i].h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
-                            (GLvoid*)g_asset_imgs[i]));
+                            g_image_info[i].w, g_image_info[i].h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                            (GLvoid*)g_image_info[i].bits));
     }
 }
 
-
-static void enable_asset(AssetIndex idx)
+static void load_audio(AudioIndex idx, char* fname)
 {
-    auto texid = g_asset_infos[(int) idx].texid;
+    int i = (int)idx;
+    if (g_audio_items[i].samples != NULL) {
+        die_gracefully("Trying to load audio twice.");
+    }
+
+    int num_channels, sample_rate;
+    short* samples;
+
+    int num_samples = stb_vorbis_decode_filename(fname, &num_channels, &sample_rate, &samples);
+    if (num_samples == -1)  {
+        printf("trying to open file %s\n", fname);
+        die_gracefully("stb vorbis could not open or decode");
+    }
+
+    // We are good to go.
+    g_audio_items[i].samples = samples;
+    g_audio_items[i].rate = sample_rate;
+    g_audio_items[i].num_channels = num_channels;
+    g_audio_items[i].num_samples = num_samples;
+}
+
+
+static void enable_image(ImageIndex idx)
+{
+    auto texid = g_image_info[(int) idx].texid;
     GLCHK (glBindTexture (GL_TEXTURE_2D, texid));
 }
 
@@ -147,15 +185,15 @@ static void chew_input(ChewDir dir)
     g_jaw_vpos = k_jaw_up_position;
 
     if ( dir == ChewDir::LEFT ) {
-        g_jaw_angle -= kPi / 4;
+        g_jaw_angle += kPi / 4;
     }
     if ( dir == ChewDir::RIGHT ) {
-        g_jaw_angle += kPi / 4;
+        g_jaw_angle -= kPi / 4;
     }
 }
 
 
-static void game_tick(double dt)
+static void game_tick(float dt)
 {
 
     float height_constant = 0.05f;
@@ -190,10 +228,10 @@ static void game_tick(double dt)
 //  |        |
 //  b--------c
 //
-static void draw_sprite(AssetIndex idx,
+static void draw_sprite(ImageIndex idx,
                         v2f a, v2f b, v2f c, v2f d)
 {
-    enable_asset(idx);
+    enable_image(idx);
 
     glColor3f(0,1,0);
     glBegin(GL_QUADS);
@@ -206,6 +244,74 @@ static void draw_sprite(AssetIndex idx,
     glTexCoord2f(1, 1);
     glVertex3f(d.x,d.y,0);
     glEnd();
+}
+
+static void draw_circle()
+{
+
+}
+
+static void game_render()
+{
+    // draw_sprite(ImageIndex::BACKGROUND, {-1, -1}, {-1, 1}, {1, 1}, {1, -1});
+
+    auto to_positive = [](float f) -> float {
+        float res = (f + 1)/2;
+        return res;
+    };
+
+    float left_height  = g_jaw_vpos;
+    float right_height = g_jaw_vpos;
+
+    float jaw_width = 0.4;
+    float jaw_height = 0.7;
+
+    float headtop_width = jaw_width * 1.1;
+    float headtop_height = jaw_height * 0.8;
+
+
+    v2f a = {-jaw_width, left_height};
+    v2f b = {-jaw_width, left_height + jaw_height};
+    v2f c = {jaw_width, right_height + jaw_height};
+    v2f d = {jaw_width, right_height};
+
+
+    float pendulum_height = 0.3f;
+
+    v2f center = { 0, g_jaw_vpos + (jaw_height / 2) + pendulum_height };
+
+    auto rotated = [&](v2f p, float a) -> v2f {
+        v2f res;
+
+        float c = cosf(a);
+        float s = sinf(a);
+
+        p.x -= center.x;
+        p.y -= center.y;
+
+        res.x = c*(p.x) + s*(p.y);
+        res.y = c*(p.y) - s*(p.x);
+
+        res.x += center.x;
+        res.y += center.y;
+
+        return res;
+    };
+
+    draw_sprite(ImageIndex::SPRITE_INSIDES,
+                {-0.8f * jaw_width, g_jaw_vpos +0.7f +0.7f*jaw_height },
+                {-0.8f * jaw_width, g_jaw_vpos +0.7f -0.7f*jaw_height },
+                {0.8f * jaw_width,  g_jaw_vpos +0.7f -0.7f*jaw_height },
+                {0.8f * jaw_width,  g_jaw_vpos +0.7f +0.7f*jaw_height });
+
+    draw_sprite(ImageIndex::SPRITE_JAW,
+                rotated(a, g_jaw_angle), rotated(b, g_jaw_angle), rotated(c, g_jaw_angle), rotated(d, g_jaw_angle));
+
+    draw_sprite(ImageIndex::SPRITE_HEADTOP,
+                {-headtop_width, 0.45f + -headtop_height},
+                {-headtop_width, 0.45f +  headtop_height},
+                {headtop_width,  0.45f +  headtop_height},
+                {headtop_width,  0.45f + -headtop_height});
 }
 
 
@@ -257,10 +363,11 @@ int main()
     }
 
 
-    load_asset(AssetIndex::BACKGROUND, "background.png");
-    load_asset(AssetIndex::SPRITE_JAW, "jaw.png");
-    load_asset(AssetIndex::SPRITE_HEADTOP, "headtop.png");
-    load_asset(AssetIndex::SPRITE_INSIDES, "insides.png");
+    load_image(ImageIndex::BACKGROUND, "background.png");
+    load_image(ImageIndex::SPRITE_JAW, "jaw.png");
+    load_image(ImageIndex::SPRITE_HEADTOP, "headtop.png");
+    load_image(ImageIndex::SPRITE_INSIDES, "insides.png");
+    load_audio(AudioIndex::START, "start.ogg");
 
     const char* shader_contents[2];
     shader_contents[0] =
@@ -325,65 +432,8 @@ int main()
 
         game_tick(dt);
 
+        game_render();
 
-        // draw_sprite(AssetIndex::BACKGROUND, {-1, -1}, {-1, 1}, {1, 1}, {1, -1});
-
-        auto to_positive = [](float f) -> float {
-            float res = (f + 1)/2;
-            return res;
-        };
-
-        float left_height  = g_jaw_vpos;
-        float right_height = g_jaw_vpos;
-
-        float jaw_width = 0.4;
-        float jaw_height = 0.7;
-
-        float headtop_width = jaw_width * 1.1;
-        float headtop_height = jaw_height * 0.8;
-
-
-        v2f a = {-jaw_width, left_height};
-        v2f b = {-jaw_width, left_height + jaw_height};
-        v2f c = {jaw_width, right_height + jaw_height};
-        v2f d = {jaw_width, right_height};
-
-
-        float pendulum_height = 0.3f;
-
-        v2f center = { 0, g_jaw_vpos + (jaw_height / 2) + pendulum_height };
-
-        auto rotated = [&](v2f p, float a) -> v2f {
-            v2f res;
-
-            float c = cosf(a);
-            float s = sinf(a);
-
-            p.x -= center.x;
-            p.y -= center.y;
-
-            res.x = c*(p.x) + s*(p.y);
-            res.y = c*(p.y) - s*(p.x);
-
-            res.x += center.x;
-            res.y += center.y;
-
-            return res;
-        };
-
-        draw_sprite(AssetIndex::SPRITE_INSIDES,
-                    {-0.8f * jaw_width, g_jaw_vpos +0.7f +0.7f*jaw_height },
-                    {-0.8f * jaw_width, g_jaw_vpos +0.7f -0.7f*jaw_height },
-                    {0.8f * jaw_width,  g_jaw_vpos +0.7f -0.7f*jaw_height },
-                    {0.8f * jaw_width,  g_jaw_vpos +0.7f +0.7f*jaw_height });
-
-        draw_sprite(AssetIndex::SPRITE_JAW,
-                    rotated(a, g_jaw_angle), rotated(b, g_jaw_angle), rotated(c, g_jaw_angle), rotated(d, g_jaw_angle));
-        draw_sprite(AssetIndex::SPRITE_HEADTOP,
-                    {-headtop_width, 0.45f + -headtop_height},
-                    {-headtop_width, 0.45f +  headtop_height},
-                    {headtop_width,  0.45f +  headtop_height},
-                    {headtop_width,  0.45f + -headtop_height});
 
         glfwSwapBuffers(window);
         glfwPollEvents();
