@@ -1,14 +1,24 @@
 /**
  * TODO:
- *  - Window resizing.
- *  - Actual background
+ *  - Head shrink/grow
+ *  - Impl pills
+ *  - Impl crap
+ *  - Integrate stb truetype
+ *  - End state. (Print score)
+ *  - Window resizing?
  *
  */
+
+#include <atomic>
+#include <thread>
 
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <Windows.h>
+#endif
 
 static void die_gracefully(char* msg);
 
@@ -19,6 +29,8 @@ static void die_gracefully(char* msg);
 
 #include "audio.h"
 #include "audio.cc"
+
+#include "vector.hh"
 
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -33,10 +45,12 @@ static bool g_should_quit = false;
 
 enum class ImageIndex {
     BACKGROUND,
-    SPRITE_JAW,
-    SPRITE_HEADTOP,
-    SPRITE_INSIDES,
-    SPRITE_CIRCLE,
+    JAW,
+    HEADTOP,
+    INSIDES,
+    CIRCLE,
+    GUM_ORANGE,
+    TOOTH,
     COUNT,
 };
 
@@ -66,11 +80,6 @@ struct AudioInfo {
 };
 
 
-struct v2f {
-    float x,y;
-};
-
-
 enum InputFlags {
     NONE,
     GOT_LEFT  = 1 << 0,
@@ -91,6 +100,8 @@ static const float k_max_btn_radius    = 0.40f;
 struct GameState {
     static const float beat_length;
     static const float rhythm_period;
+
+    float head_scale = 1.0f;
 
     float dt_accum;
 
@@ -117,6 +128,23 @@ static const float kPi                 = 3.141592654f;
 static float g_jaw_vpos = k_jaw_down_position;
 static float g_jaw_angle;
 
+
+// Immediate mode scaling
+static v2f      g_scale_center;
+static float    g_scale_factor;
+
+static void begin_scale(v2f center, float factor)
+{
+    g_scale_center = center;
+    g_scale_factor = factor;
+}
+
+static void end_scale()
+{
+    g_scale_center = {};
+    g_scale_factor = 1;
+}
+
 static void die_gracefully(char* msg)
 {
     puts(msg);
@@ -133,6 +161,16 @@ enum class ChewDir {
     LEFT,
     RIGHT,
 };
+
+static void sleep_ms(int ms)
+{
+#ifdef _WIN32
+    Sleep(ms);
+#else
+#error implement
+#endif
+
+}
 
 static void chew_input(ChewDir dir);
 
@@ -237,7 +275,7 @@ static void load_audio(AudioIndex idx, char* fname, int sample_padding = 0)
     g_audio_items[i].num_samples = num_samples;
 }
 
-static void push_audio(AudioIndex idx, AudioOpts opts = AudioOpts::NOTHING)
+static void push_audio(int queue_i, AudioIndex idx, AudioOpts opts = AudioOpts::NOTHING)
 {
     int i = (int)idx;
     AudioInfo* ai = &g_audio_items[i];
@@ -248,10 +286,10 @@ static void push_audio(AudioIndex idx, AudioOpts opts = AudioOpts::NOTHING)
 
     switch ( opts ) {
     case AudioOpts::NOTHING:
-        audio_push_sample(ai->samples, ai->num_samples);
+        audio_push_sample(queue_i, ai->samples, ai->num_samples);
         break;
     case AudioOpts::LOOP_FOREVER:
-        audio_push_sample(ai->samples, ai->num_samples, -1);
+        audio_push_sample(queue_i, ai->samples, ai->num_samples, -1);
         break;
     default:
         assert ("not implemented\n");
@@ -281,6 +319,11 @@ static void chew_input(ChewDir dir)
 
 static void game_tick(float dt, GameState* gs)
 {
+    gs->head_scale -= 0.001f;
+
+    if ( gs->head_scale <= 0.001f ) {
+        gs->head_scale = 1;
+    }
 
     if (g_input_flags & GOT_LEFT) {
         gs->btn_states[0] = ButtonState::GOING_UP;
@@ -344,6 +387,15 @@ static void draw_sprite(ImageIndex idx,
                         v2f a, v2f b, v2f c, v2f d)
 {
     enable_image(idx);
+
+    a -= g_scale_center;
+    a = a * g_scale_factor;
+    b -= g_scale_center;
+    b = b * g_scale_factor;
+    c -= g_scale_center;
+    c = c * g_scale_factor;
+    d -= g_scale_center;
+    d = d * g_scale_factor;
 
     glColor3f(0,1,0);
     glBegin(GL_QUADS);
@@ -417,29 +469,33 @@ static void game_render(float dt, GameState* gs)
         return res;
     };
 
-    draw_sprite(ImageIndex::SPRITE_INSIDES,
+    begin_scale(center, gs->head_scale);
+
+    draw_sprite(ImageIndex::INSIDES,
                 {-0.8f * jaw_width, g_jaw_vpos +0.7f +0.7f*jaw_height },
                 {-0.8f * jaw_width, g_jaw_vpos +0.7f -0.7f*jaw_height },
                 {0.8f * jaw_width,  g_jaw_vpos +0.7f -0.7f*jaw_height },
                 {0.8f * jaw_width,  g_jaw_vpos +0.7f +0.7f*jaw_height });
 
-    draw_sprite(ImageIndex::SPRITE_JAW,
+    draw_sprite(ImageIndex::JAW,
                 rotated(a, g_jaw_angle), rotated(b, g_jaw_angle), rotated(c, g_jaw_angle), rotated(d, g_jaw_angle));
 
-    draw_sprite(ImageIndex::SPRITE_HEADTOP,
+    draw_sprite(ImageIndex::HEADTOP,
                 {-headtop_width, 0.45f + -headtop_height},
                 {-headtop_width, 0.45f +  headtop_height},
                 {headtop_width,  0.45f +  headtop_height},
                 {headtop_width,  0.45f + -headtop_height});
+
+    end_scale();
 
     // End of Render Face
     ////////////////////////////////////////////////////////////
 
     gs->dt_accum += dt;
     if (gs->dt_accum < GameState::rhythm_period - GameState::beat_length) {
-        draw_square_sprite(ImageIndex::SPRITE_CIRCLE,
+        draw_square_sprite(ImageIndex::CIRCLE,
                            -0.65, -0.7, gs->btn_radius[0]);
-        draw_square_sprite(ImageIndex::SPRITE_CIRCLE,
+        draw_square_sprite(ImageIndex::CIRCLE,
                            0.65, -0.7, gs->btn_radius[1]);
     } else if (gs->dt_accum > GameState::rhythm_period) {
         gs->dt_accum = 0;
@@ -497,10 +553,11 @@ int main()
     audio_init();
 
     load_image(ImageIndex::BACKGROUND, "background.png");
-    load_image(ImageIndex::SPRITE_JAW, "jaw.png");
-    load_image(ImageIndex::SPRITE_HEADTOP, "headtop.png");
-    load_image(ImageIndex::SPRITE_INSIDES, "insides.png");
-    load_image(ImageIndex::SPRITE_CIRCLE, "circle.png");
+    load_image(ImageIndex::JAW, "jaw.png");
+    load_image(ImageIndex::HEADTOP, "headtop.png");
+    load_image(ImageIndex::INSIDES, "insides.png");
+    load_image(ImageIndex::CIRCLE, "circle.png");
+    load_image(ImageIndex::GUM_ORANGE, "gum_orange.png");
 
     load_audio(AudioIndex::DUKE, "duke.ogg");
     load_audio(AudioIndex::LOOP, "loop.ogg", /*padding*/44100/16);
@@ -558,12 +615,20 @@ int main()
     glClearColor(1,1,1,1);
 
     // Push d7samurai's Duke Nukem quote remix of awesomeness.
-    push_audio(AudioIndex::DUKE);
-    push_audio(AudioIndex::LOOP, AudioOpts::LOOP_FOREVER);
+    push_audio(1, AudioIndex::DUKE);
+    push_audio(1, AudioIndex::LOOP, AudioOpts::LOOP_FOREVER);
+    // Launch a thread that sleeps a while before adding the second duke nukem quote
+    std::thread duke_thread([]() {
+                                sleep_ms(6000);
+                                push_audio(0, AudioIndex::DUKE);
+                            });
+
+    //std::atomic_thread_fence(std::memory_order_seq_cst);
+    duke_thread.detach();
 
     double then = glfwGetTime();
 
-    GameState gs;
+    GameState gs = {};
 
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
