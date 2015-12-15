@@ -466,7 +466,7 @@ static Eatable* pop_eatable_until(EatableQueue* queue, int to_pop)
     return res;
 }
 
-static void game_tick(float dt, GameState* gs)
+static void game_tick(double dt, GameState* gs)
 {
 
     gs->accum_speedup += dt;
@@ -667,7 +667,7 @@ static void render_score(GameState* gs, bool with_multiplier = true)
     //glEnable(GL_BLEND);
 }
 
-static void game_render(float dt, GameState* gs)
+static void game_render(double dt, GameState* gs)
 {
     if (gs->dead) {
         draw_sprite(ImageIndex::DEAD_SCREEN,
@@ -934,7 +934,7 @@ int main()
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        float dt = now - then;
+        double dt = now - then;
 
         game_tick(dt, &gs);
 
