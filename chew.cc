@@ -19,9 +19,14 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
+
 #ifdef _WIN32
 #include <Windows.h>
 #endif
+
+static int g_win_width;
+static int g_win_height;
 
 static void die_gracefully(char* msg);
 
@@ -31,7 +36,8 @@ static void die_gracefully(char* msg);
 #include "gl_helpers.h"
 
 #include "audio.h"
-#include "audio.cc"
+
+#include "text.h"
 
 #include "vector.hh"
 
@@ -44,6 +50,7 @@ static void die_gracefully(char* msg);
 #include "glfw/glfw3.h"
 
 
+static bool g_any = false;  // Any key pressed.
 static bool g_should_quit = false;
 
 enum class ImageIndex {
@@ -54,7 +61,7 @@ enum class ImageIndex {
     CIRCLE,
     GUM_ORANGE,
     GUM_BLUE,
-    TOOTH,
+    DEAD_SCREEN,
     COUNT,
 };
 
@@ -118,6 +125,8 @@ struct EatableQueue {
 };
 
 
+static GLuint quad_program;
+
 static int g_input_flags;
 
 static const float k_btn_y                = -0.70f;
@@ -133,11 +142,20 @@ struct GameState {
     static const float beat_length;
     static const float rhythm_period;
 
+    int score = 0;
+    int spree_count = 0;
+
     float head_scale = 1.0f;
     float shrink_speed = k_default_shrink_speed;
 
     float dt_accum_spawn;
     float dt_accum_rhythm;
+
+    float accum_speedup;
+
+    float eatable_speed = k_eatable_speed;
+
+    float spawn_threshold = 1.5f;
 
     float btn_radius[2] = { k_normal_btn_radius, k_normal_btn_radius };
 
@@ -152,14 +170,11 @@ struct GameState {
     };
 
     EatableColor last_color = EatableColor::COUNT;
-    bool is_spree;
+    bool dead;
 };
 
 const float GameState::beat_length   = 0.005;
 const float GameState::rhythm_period = 0.28571428;
-
-static int g_win_width;
-static int g_win_height;
 
 static ImageInfo    g_image_info[ImageIndex::COUNT];
 static AudioInfo    g_audio_items[AudioIndex::COUNT];
@@ -223,6 +238,7 @@ static void chew_input(ChewDir dir);
 static void key_callback(GLFWwindow* win, int key, int scancode, int action, int mods)
 {
     if (action == GLFW_PRESS) {
+
         if (key == GLFW_KEY_ESCAPE) {
             g_should_quit = true;
         }
@@ -230,10 +246,11 @@ static void key_callback(GLFWwindow* win, int key, int scancode, int action, int
         if (key == GLFW_KEY_LEFT) {
             chew_input(ChewDir::LEFT);
             g_input_flags |= GOT_LEFT;
-        }
-        if (key == GLFW_KEY_RIGHT) {
+        } else if (key == GLFW_KEY_RIGHT) {
             chew_input(ChewDir::RIGHT);
             g_input_flags |= GOT_RIGHT;
+        } else {
+            g_any = true;
         }
     }
 }
@@ -368,7 +385,6 @@ static void draw_sprite(ImageIndex idx,
     d -= g_scale_center;
     d = d * g_scale_factor;
 
-    glColor3f(0,1,0);
     glBegin(GL_QUADS);
     glTexCoord2f(0, 1);
     glVertex3f(a.x,a.y,0);
@@ -439,8 +455,38 @@ static Eatable* pop_eatable(EatableQueue* queue)
     return res;
 }
 
+static Eatable* pop_eatable_until(EatableQueue* queue, int to_pop)
+{
+    Eatable* res;
+    do {
+        res = peek_eatable(queue);
+        queue->head = (queue->head + 1) % k_eatable_queue_items;
+    } while (queue->head != to_pop);
+
+    return res;
+}
+
 static void game_tick(float dt, GameState* gs)
 {
+
+    gs->accum_speedup += dt;
+
+    if ( gs->accum_speedup > 30 ) {
+        printf( "Moar speeeed.\n" );
+        gs->eatable_speed += k_eatable_speed;
+        gs->spawn_threshold *= 0.75f;;
+        gs->accum_speedup = 0;
+    }
+
+    if (gs->dead) {
+        if (g_any) {
+            gs->dead = false;
+            gs->score = 0;
+            gs->spree_count = 0;
+        }
+        return;
+    }
+    g_any = false;
     gs->dt_accum_spawn += dt;
 
 
@@ -494,10 +540,8 @@ static void game_tick(float dt, GameState* gs)
         }
     }
 
-    float spawn_threshold = 1.5f;
-
     // Spawn?
-    if ( gs->dt_accum_spawn >  spawn_threshold) {
+    if ( gs->dt_accum_spawn >  gs->spawn_threshold) {
         gs->dt_accum_spawn = 0;
         int side = rand() % 2;
 
@@ -522,20 +566,20 @@ static void game_tick(float dt, GameState* gs)
 
     // Iterate through eatables.
 
+    bool collided = false;
     for (int ei = 0; ei < 2; ++ei) {
         EatableQueue* eq = &gs->eatable_queues[ei];
-        bool collided = false;
         for (int i = eq->head; !collided && i != eq->tail; i = (i+1)%k_eatable_queue_items) {
             Eatable* eatable = &eq->items[i];
 
             // Make eatables fall
-            eatable->height -= k_eatable_speed;
+            eatable->height -= gs->eatable_speed;
 
             // Collide against respective circles.
             if ( gs->btn_states[ei] != ButtonState::NORMAL ) {
                 float btn_x = ei == 0? -k_btn_x_from_center : k_btn_x_from_center;
                 float btn_y = k_btn_y;
-#if 1
+#if 0
                 float btn_w = k_normal_btn_radius;
 #else
                 float btn_w = gs->btn_radius[ei];
@@ -547,6 +591,15 @@ static void game_tick(float dt, GameState* gs)
 
                 if ( collide_squares(btn_x, btn_y, btn_w,
                                      eat_x, eat_y, eat_w) ) {
+
+                    if ( gs->last_color != eatable->color ) {
+                        gs->spree_count = 0;
+                        gs->score += 10;
+                    }
+                    else {
+                        gs->spree_count++;
+                        gs->score += 10 * 1+gs->spree_count;
+                    }
 
                     float factor = 1;
                     switch ( eatable->color ) {
@@ -568,23 +621,12 @@ static void game_tick(float dt, GameState* gs)
                         break;
 
                     }
-                    /*
-                    if ( gs->last_color == eatable->color ) {
-                        factor = 4;
-                        gs->shrink_speed += 0.0005f;
-                        gs->is_spree = true;
-                    } else {
-                        // If leaving spree, slow down shrinking
-                        if (gs->is_spree) {
-                            gs->shrink_speed -= 0.002f;
-                        }
-                        gs->is_spree = false;
-                    }
-                    */
+
                     gs->head_scale *= eatable->value;
-                    pop_eatable(eq);
+                    pop_eatable_until(eq, (i+1)%k_eatable_queue_items);
                     gs->last_color = eatable->color;
                     collided = true;
+                    break;
                 }
             }
         }
@@ -595,13 +637,47 @@ static void game_tick(float dt, GameState* gs)
     if ( gs->head_scale <= 0.001f || gs->head_scale > 2.0f ) {
         gs->head_scale = 1;
         gs->shrink_speed = k_default_shrink_speed;
-        printf("===== DEAD ======\n");
+        gs->eatable_speed = k_eatable_speed;
+        gs->spawn_threshold = 1.5f;
+        gs->accum_speedup = 0;
+        gs->dt_accum_spawn = 0;
+        gs->dt_accum_rhythm = 0;
+        for ( int ei = 0; ei < 2; ++ei ) // Reset queues
+            gs->eatable_queues[ei].head = gs->eatable_queues[ei].tail = 0;
+        gs->dead = true;
     }
 
 }
 
+static void render_score(GameState* gs, bool with_multiplier = true)
+{
+    // Text test
+    //glDisable(GL_BLEND);
+
+    glUseProgramObjectARB(0);
+    char buffer[1024];
+    if (gs->spree_count == 0 || !with_multiplier)
+        sprintf(buffer, "Score: %d", gs->score);
+    else
+        sprintf(buffer, "Score: %d ( %dX! )", gs->score, 1+gs->spree_count);
+
+    int pad = with_multiplier? 0 : 100;
+    my_stbtt_print(pad + 0.3f* g_win_width ,0.05f * g_win_height, buffer);
+    glUseProgramObjectARB(quad_program);
+    //glEnable(GL_BLEND);
+}
+
 static void game_render(float dt, GameState* gs)
 {
+    if (gs->dead) {
+        draw_sprite(ImageIndex::DEAD_SCREEN,
+                    {-1, -1},
+                    {-1, 1},
+                    {1, 1},
+                    {1, -1});
+        render_score(gs, false);
+        return;
+    }
 
     auto to_positive = [](float f) -> float {
         float res = (f + 1)/2;
@@ -709,10 +785,21 @@ static void game_render(float dt, GameState* gs)
                                k_eatable_width);
         }
     }
+
+    render_score(gs);
 }
 
 
+#ifdef RELEASE_CHEW
+int CALLBACK WinMain(
+        HINSTANCE hInstance,
+        HINSTANCE hPrevInstance,
+        LPSTR lpCmdLine,
+        int nCmdShow
+        )
+#else
 int main()
+#endif
 {
     GLFWwindow* window;
 
@@ -767,9 +854,12 @@ int main()
     load_image(ImageIndex::CIRCLE, "circle.png");
     load_image(ImageIndex::GUM_ORANGE, "gum_orange.png");
     load_image(ImageIndex::GUM_BLUE, "gum_blue.png");
+    load_image(ImageIndex::DEAD_SCREEN, "dead.png");
 
     load_audio(AudioIndex::DUKE, "duke.ogg");
     load_audio(AudioIndex::LOOP, "loop.ogg", /*padding*/44100/16);
+
+    my_stbtt_initfont();
 
     const char* shader_contents[2];
     shader_contents[0] =
@@ -808,7 +898,7 @@ int main()
         GLuint shader_type = (GLuint)((i == 0) ? GL_VERTEX_SHADER_ARB : GL_FRAGMENT_SHADER_ARB);
         shader_objects[i] = gl_compile_shader(shader_contents[i], shader_type);
     }
-    GLint quad_program = glCreateProgramObjectARB();
+    quad_program = glCreateProgramObjectARB();
     gl_link_program(quad_program, shader_objects, 2);
 
     GLCHK (glUseProgramObjectARB(quad_program));
@@ -827,17 +917,17 @@ int main()
     push_audio(1, AudioIndex::DUKE);
     push_audio(1, AudioIndex::LOOP, AudioOpts::LOOP_FOREVER);
     // Launch a thread that sleeps a while before adding the second duke nukem quote
-    std::thread duke_thread([]() {
-                                sleep_ms(6000);
-                                push_audio(0, AudioIndex::DUKE);
-                            });
-
-
-    duke_thread.detach();
+    /* std::thread duke_thread([]() { */
+    /*                             sleep_ms(6000); */
+    /*                             push_audio(0, AudioIndex::DUKE); */
+    /*                         }); */
+    /* duke_thread.detach(); */
 
     double then = glfwGetTime();
 
     GameState gs = {};
+
+    srand(time(NULL));
 
     while (!glfwWindowShouldClose(window)) {
         double now = glfwGetTime();
@@ -865,3 +955,6 @@ int main()
     glfwTerminate();
     return 0;
 }
+
+#include "audio.cc"
+#include "text.cc"
